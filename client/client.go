@@ -13,8 +13,8 @@ import (
 )
 
 func main() {
-	testKey := []byte{129,50,227,239}
-	testIFIP := "192.168.9.9"
+	testKey := []byte{129,50,227,239,129,50,227,239,129,50,227,239,129,50,227,239,}
+	testIFIP := "192.168.5.14/24"
 	testServerIP := "129.213.102.19"
 	iface, err := createTun(testIFIP)
 	if err != nil {
@@ -24,6 +24,12 @@ func main() {
 	relayClient := relay.MakeRelayClient(testServerIP, testKey)
 	go listenInterface(relayClient, iface, stopChan)
 	go listenInbound(relayClient, iface, stopChan)
+	// Wait for user to input "stop"
+	var input string
+	fmt.Println("Press Enter to stop...")
+	fmt.Scanln(&input)
+	stopChan <- true
+	iface.Close()
 }
 
 func RunCommand(command string) (string, error) {
@@ -49,21 +55,23 @@ func createTun(ip string) (*water.Interface, error) {
 		return nil, err
 	}
 	log.Printf("Interface Name: %s\n", iface.Name())
-	out, err := RunCommand(fmt.Sprintf("sudo ip addr add %s/24 dev %s", ip, iface.Name()))
-	if err != nil {
-		fmt.Println(out)
-	}
 
-	out, err = RunCommand(fmt.Sprintf("sudo ip link set dev %s up", iface.Name()))
+	out, err := RunCommand(fmt.Sprintf("sudo ip link set up dev %s", iface.Name()))
 	if err != nil {
 		fmt.Println(out)
 		return nil, err
 	}
+
+	out, err = RunCommand(fmt.Sprintf("sudo ip addr add %s dev %s", ip, iface.Name()))
+	if err != nil {
+		fmt.Println(out)
+	}
+
+	
 	return iface, nil
 }
 
 func listenInterface(client *relay.RelayClient, iface *water.Interface, stopChan chan bool) {
-	fmt.Println("interface listening")
 	packet := make([]byte, 65535)
 	for {
 		n, err := iface.Read(packet)
@@ -71,13 +79,15 @@ func listenInterface(client *relay.RelayClient, iface *water.Interface, stopChan
 			log.Println("ifce read error:", err)
 		}
 		if err == nil {
-			WritePacket((packet[:n]))
-			
+			fmt.Printf("Received packet size %d content %d\n", n, packet[:n])
+			PrintPacket((packet[:n]))
+			client.ForwardPacket(packet[:n])
 		}
 	}
 }
 
-func WritePacket(frame []byte) {
+
+func PrintPacket(frame []byte) {
 	header, err := ipv4.ParseHeader(frame)
 	if err != nil {
 		fmt.Println("write packet err:", err)
@@ -86,5 +96,19 @@ func WritePacket(frame []byte) {
 		fmt.Println("DST:", header.Dst)
 		fmt.Println("ID:", header.ID)
 		fmt.Println("CHECKSUM:", header.Checksum)
+	}
+}
+
+func listenInbound(client *relay.RelayClient, iface *water.Interface, stopChan chan bool) {
+	packet := make([]byte, 65535)
+	for {
+		packetLen := client.ReceivePacket(packet)
+		if packetLen == 0 {
+			log.Println("Error receiving packet or packet size is zero")
+			continue
+		}
+		bytesWritten := 0
+		for bytesWritten < len(packet) {
+			
 	}
 }

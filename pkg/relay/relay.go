@@ -1,47 +1,71 @@
 package relay
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
-	"net/netip"
-	"netip"
 
 	"github.com/google/netstack/tcpip/header"
-	"golang.org/x/net/ipv4"
-
-	"github.com/Bokai-Bi/Relay/internal/relaycrypt"
 )
 
 type RelayClient struct {
-	serverIP net.IP
-	serverConn net.Conn
-	encryptor *relaycrypt.AESEncryptor
-	recvBuffer []byte // buffer used to get incoming data
-	sendBuffer []byte // buffer used to store data before sending
-	sendFragmentBuffer []byte // in case the additional encrypted target ip exceeds max ip packet size, fragment
+	serverIP *net.TCPAddr
+	serverConn *net.TCPConn
+	// encryptor *relaycrypt.AESEncryptor
 }
 
 const MAX_IP_DATA_SIZE int = 65515
 func MakeRelayClient(server string, encryptKey []byte) *RelayClient {
 	client := new(RelayClient)
-	serverIP := net.ParseIP(server)
-	if serverIP == nil {
-		fmt.Errorf("Cannot parse server to ip, server: ", server)
+	serverIP, err := net.ResolveTCPAddr("tcp4", server)
+	if err != nil {
+		fmt.Errorf("Cannot parse server to ip and port, server: ", server)
 	}
 	client.serverIP = serverIP
-	temp, err := net.Dial("ip4", server)
+	client.serverConn, err = net.DialTCP("tcp4", nil, serverIP)
 	if err != nil {
-		fmt.Errorf("Cannot dial to server, ", server)
+		fmt.Errorf("Cannot dial to server, ", serverIP)
 	}
-	client.serverConn = temp
-	client.encryptor = relaycrypt.MakeAES128Encryptor(encryptKey)
-	client.recvBuffer = make([]byte, MAX_IP_DATA_SIZE)
-	client.sendBuffer = make([]byte, MAX_IP_DATA_SIZE)
-	client.sendFragmentBuffer = make([]byte, MAX_IP_DATA_SIZE)
+	// client.encryptor = relaycrypt.MakeAES128Encryptor(encryptKey)
+	
 	return client
 }
 
-// Wrap the content of an ip packet inside a relay packet and return the packet to send
+func (client *RelayClient) ForwardPacket(packet []byte) {
+	bytesWritten := 0
+	for bytesWritten < len(packet) {
+		written, err := client.serverConn.Write(packet)
+		if err != nil {
+			fmt.Println("Error writing to server: ", err)
+			return
+		}
+		bytesWritten += written
+	}
+}
+
+func (client *RelayClient) ReceivePacket(buffer []byte) int {
+	bytesRead := 0
+	for bytesRead < 4 {
+		n, err := client.serverConn.Read(buffer[bytesRead:4])
+		if err != nil {
+			fmt.Println("Error reading from server: ", err)
+			return 0
+		}
+		bytesRead += n
+	}
+	packetSize := int(binary.BigEndian.Uint16(buffer[2:4]))
+	for bytesRead < packetSize {
+		n, err := client.serverConn.Read(buffer[bytesRead:packetSize])
+		if err != nil {
+			fmt.Println("Error reading from server: ", err)
+			return 0
+		}
+		bytesRead += n
+	}
+	return packetSize
+}
+
+/* // Wrap the content of an ip packet inside a relay packet and return the packet to send
 func (client *RelayClient) SendRelayPacket(data []byte) error {
 	header, err := ipv4.ParseHeader(data)
 	if err != nil {
@@ -64,9 +88,9 @@ func (client *RelayClient) SendRelayPacket(data []byte) error {
 		ReliableWrite(client.serverConn, client.sendBuffer, sz, protocol)
 	}
 	return nil
-}
+} */
 
-func ReliableWrite(conn net.Conn, data []byte, size int, protocol int) error {
+/* func ReliableWrite(conn net.Conn, data []byte, size int, protocol int) error {
 	written := 0
 	for (written < size) {
 		w, err := conn.Write(data[written:size])
@@ -77,16 +101,86 @@ func ReliableWrite(conn net.Conn, data []byte, size int, protocol int) error {
 		written += w
 	}
 	return nil
-}
+} */
 
 type RelayServer struct {
-	encryptKey []byte
-	forwardList map[netip.AddrPort] netip.AddrPort
+	ListeningPort int
+	ListeningConn *net.TCPListener
 }
-// Unwrap the content of 
-func forwardRelayPacket() {
 
+func MakeRelayServer(port int) *RelayServer {
+	server := new(RelayServer)
+	serverIP, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		fmt.Errorf("Cannot parse server to ip and port, port: %d", port)
+		return nil
+	}
+	server.ListeningPort = port
+	server.ListeningConn, err = net.ListenTCP("tcp4", serverIP)
+	if err != nil {
+		fmt.Errorf("Cannot listen to port %d, error: %v", port, err)
+		return nil
+	}
+	return server
 }
+
+func (server *RelayServer) AcceptConnection() (*net.TCPConn, error) {
+	conn, err := server.ListeningConn.AcceptTCP()
+	if err != nil {
+		fmt.Errorf("Error accepting connection: %v", err)
+		return nil, err
+	}
+	fmt.Printf("Accepted connection from %s\n", conn.RemoteAddr().String())
+	return conn, nil
+}
+
+func (server *RelayServer) HandleClient(conn *net.TCPConn) {
+	defer conn.Close()
+	buffer := make([]byte, 65535)
+	for {
+		packetSize := server.ReceivePacket(conn, buffer)
+		if packetSize == 0 {
+			fmt.Println("No data received or error occurred")
+			return
+		}
+		fmt.Printf("Received packet of size %d\n", packetSize)
+		
+		// extract source port, destination ip and port
+		// parse as ip packet
+		ipHeader := header.IPv4(buffer[:packetSize])
+		if !ipHeader.IsValid(packetSize) {
+			fmt.Println("Invalid IP header")
+			return
+		}
+
+		dstIP := ipHeader.DestinationAddress()
+		dstPort := binary.BigEndian.Uint16(ipHeader.Payload()[2:4])
+		srcPort := binary.BigEndian.Uint16(ipHeader.Payload()[0:2])
+	}
+}
+
+func (server *RelayServer) ReceivePacket(conn *net.TCPConn, buffer []byte) int {
+	bytesRead := 0
+	for bytesRead < 4 {
+		n, err := conn.Read(buffer[bytesRead:4])
+		if err != nil {
+			fmt.Println("Error reading from client: ", err)
+			return 0
+		}
+		bytesRead += n
+	}
+	packetSize := int(binary.BigEndian.Uint16(buffer[2:4]))
+	for bytesRead < packetSize {
+		n, err := conn.Read(buffer[bytesRead:packetSize])
+		if err != nil {
+			fmt.Println("Error reading from client: ", err)
+			return 0
+		}
+		bytesRead += n
+	}
+	return packetSize
+}
+
 
 func ComputeChecksum(b []byte) uint16 {
 	checksum := header.Checksum(b, 0)
