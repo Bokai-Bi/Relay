@@ -1,3 +1,3 @@
 # Relay
-A lightweight, ip-over-ip VPN protocol that aims to achieve the smallest performance & networking overhead.
+Infrastructure for Chameleon, an always-shifting proxy protocol.
 -- Currently in the works :) --
